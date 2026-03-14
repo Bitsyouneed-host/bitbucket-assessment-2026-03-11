@@ -26,10 +26,23 @@ contract Token is IERC20, IMintableToken, IDividends {
   address[] private _holders;
   mapping (address => uint256) private _holderIndex; // 1-based; 0 = not a holder
 
-  // Dividends
-  mapping (address => uint256) private _dividends;
+  // Dividends — O(1) accumulator pattern
+  uint256 private constant SCALE = 1e18;
+  uint256 private _dividendPerToken;
+  mapping (address => uint256) private _lastDividendPerToken;
+  mapping (address => uint256) private _creditedDividends;
 
-  // --- Internal holder management ---
+  // --- Internal helpers ---
+
+  function _settleDividends(address addr) internal {
+    uint256 owed = _dividendPerToken.sub(_lastDividendPerToken[addr]);
+    if (owed > 0) {
+      _creditedDividends[addr] = _creditedDividends[addr].add(
+        balanceOf[addr].mul(owed).div(SCALE)
+      );
+      _lastDividendPerToken[addr] = _dividendPerToken;
+    }
+  }
 
   function _addHolder(address addr) internal {
     if (_holderIndex[addr] == 0) {
@@ -69,6 +82,9 @@ contract Token is IERC20, IMintableToken, IDividends {
   function transfer(address to, uint256 value) external override returns (bool) {
     require(balanceOf[msg.sender] >= value, "Insufficient balance");
 
+    _settleDividends(msg.sender);
+    _settleDividends(to);
+
     balanceOf[msg.sender] = balanceOf[msg.sender].sub(value);
     balanceOf[to] = balanceOf[to].add(value);
 
@@ -87,6 +103,9 @@ contract Token is IERC20, IMintableToken, IDividends {
     require(balanceOf[from] >= value, "Insufficient balance");
     require(_allowances[from][msg.sender] >= value, "Insufficient allowance");
 
+    _settleDividends(from);
+    _settleDividends(to);
+
     balanceOf[from] = balanceOf[from].sub(value);
     balanceOf[to] = balanceOf[to].add(value);
     _allowances[from][msg.sender] = _allowances[from][msg.sender].sub(value);
@@ -102,6 +121,8 @@ contract Token is IERC20, IMintableToken, IDividends {
   function mint() external payable override {
     require(msg.value > 0, "Must send ETH");
 
+    _settleDividends(msg.sender);
+
     balanceOf[msg.sender] = balanceOf[msg.sender].add(msg.value);
     totalSupply = totalSupply.add(msg.value);
 
@@ -111,6 +132,8 @@ contract Token is IERC20, IMintableToken, IDividends {
   function burn(address payable dest) external override {
     uint256 amount = balanceOf[msg.sender];
     require(amount > 0, "No tokens to burn");
+
+    _settleDividends(msg.sender);
 
     balanceOf[msg.sender] = 0;
     totalSupply = totalSupply.sub(amount);
@@ -135,26 +158,20 @@ contract Token is IERC20, IMintableToken, IDividends {
 
   function recordDividend() external payable override {
     require(msg.value > 0, "Must send ETH");
-
-    uint256 total = totalSupply;
-    uint256 len = _holders.length;
-
-    for (uint256 i = 0; i < len; i++) {
-      address holder = _holders[i];
-      uint256 share = msg.value.mul(balanceOf[holder]).div(total);
-      _dividends[holder] = _dividends[holder].add(share);
-    }
+    _dividendPerToken = _dividendPerToken.add(msg.value.mul(SCALE).div(totalSupply));
   }
 
   function getWithdrawableDividend(address payee) external view override returns (uint256) {
-    return _dividends[payee];
+    uint256 owed = _dividendPerToken.sub(_lastDividendPerToken[payee]);
+    return _creditedDividends[payee].add(balanceOf[payee].mul(owed).div(SCALE));
   }
 
   function withdrawDividend(address payable dest) external override {
-    uint256 amount = _dividends[msg.sender];
+    _settleDividends(msg.sender);
+    uint256 amount = _creditedDividends[msg.sender];
     require(amount > 0, "No dividends");
 
-    _dividends[msg.sender] = 0;
+    _creditedDividends[msg.sender] = 0;
     dest.transfer(amount);
   }
 }
